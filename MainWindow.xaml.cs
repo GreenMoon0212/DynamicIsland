@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Management;
@@ -36,15 +36,27 @@ namespace DynamicIsland
         private string? _droppedFilePath = null;
         private GlobalSystemMediaTransportControlsSession? _currentSession;
         private DispatcherTimer _leaveTimer;
+        private DispatcherTimer _penetrateTimer; 
         private Random _rnd = new Random();
         private double _lastSliderValue = 50;
         private double _baseBlurRadius = 65; 
         private Ping _pingSender = new Ping();
         private double _currentTemp = 0;
         private bool _isOverheating = false;
+        
+        private int _initialStyle; // 用於儲存初始視窗樣式
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+        private const int WS_EX_TRANSPARENT = 0x00000020;
 
         [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, uint dwExtraInfo);
         [DllImport("user32.dll")] private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+        
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll")]
+        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
         public MainWindow()
         {
@@ -84,7 +96,38 @@ namespace DynamicIsland
             var tempTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             tempTimer.Tick += (s, e) => { UpdateTemperature(); };
             tempTimer.Start();
+
+           
+            _penetrateTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+            _penetrateTimer.Tick += (s, e) => UpdatePenetration();
+            _penetrateTimer.Start();
+
             LoadSettings(); 
+        }
+
+        private void UpdatePenetration()
+        {
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            
+            bool isAltDown = (System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Alt) == System.Windows.Input.ModifierKeys.Alt;
+            int currentStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
+
+            if (isAltDown)
+            {
+               
+                if ((currentStyle & WS_EX_TRANSPARENT) == 0)
+                {
+                    SetWindowLong(hwnd, GWL_EXSTYLE, currentStyle | WS_EX_TRANSPARENT);
+                }
+            }
+            else
+            {
+               
+                if ((currentStyle & WS_EX_TRANSPARENT) != 0)
+                {
+                    SetWindowLong(hwnd, GWL_EXSTYLE, _initialStyle | WS_EX_TOOLWINDOW);
+                }
+            }
         }
         
         private void InitTrayIcon()
@@ -355,21 +398,19 @@ namespace DynamicIsland
         private async void Next_Click(object s, RoutedEventArgs e) { if (_currentSession != null) await _currentSession.TrySkipNextAsync(); }
         public void SaveSettings(System.Windows.Media.Color c) { try { System.IO.File.WriteAllText(_savePath, $"{c.ToString()}|{_baseBlurRadius}"); } catch { } }
         private System.Windows.Media.Color GetMajorColor(BitmapSource b) { byte[] p = new byte[400]; b.CopyPixels(new Int32Rect((int)b.PixelWidth/2-5, (int)b.PixelHeight/2-5, 10, 10), p, 40, 0); long r=0, g=0, bl=0; for(int i=0; i<p.Length; i+=4){ bl+=p[i]; g+=p[i+1]; r+=p[i+2]; } return System.Windows.Media.Color.FromRgb((byte)(r/100), (byte)(g/100), (byte)(bl/100)); }
+        
         protected override void OnSourceInitialized(EventArgs e)
         {
             base.OnSourceInitialized(e);
             IntPtr hwnd = new WindowInteropHelper(this).Handle;
-            int extendedStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
-            SetWindowLong(hwnd, GWL_EXSTYLE, extendedStyle | WS_EX_TOOLWINDOW);
+            
+           
+            _initialStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
+            
+            
+            SetWindowLong(hwnd, GWL_EXSTYLE, _initialStyle | WS_EX_TOOLWINDOW);
         }
-        private const int GWL_EXSTYLE = -20;
-        private const int WS_EX_TOOLWINDOW = 0x00000080;
 
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-
-        [DllImport("user32.dll")]
-        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
         private IntPtr HwndHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled) { return IntPtr.Zero; }
     }
 }
