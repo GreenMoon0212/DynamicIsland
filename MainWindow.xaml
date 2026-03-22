@@ -1,12 +1,18 @@
-﻿<Window x:Class="DynamicIsland.MainWindow"
+<Window x:Class="DynamicIsland.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Dynamic Island" Height="800" Width="900"
-        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
-        Topmost="True" ShowInTaskbar="False" WindowStartupLocation="Manual" Top="0"
+        WindowStyle="None" 
+        AllowsTransparency="True" 
+        Background="Transparent"
+        Topmost="True" 
+        ShowInTaskbar="False" 
+        ShowActivated="False" 
+        Focusable="False"
+        ResizeMode="NoResize"
+        WindowStartupLocation="Manual" Top="0"
         Deactivated="Window_Deactivated">
     
-
     <Window.Resources>
         <Style x:Key="ControlBtnStyle" TargetType="Button">
             <Setter Property="Background" Value="Transparent"/>
@@ -24,6 +30,8 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        
+        <CubicEase x:Key="IslandEase" EasingMode="EaseOut"/>
     </Window.Resources>
 
     <Grid Background="Transparent" Height="650" VerticalAlignment="Top"
@@ -100,7 +108,12 @@
                     </StackPanel>
                     <Grid Margin="45,10">
                         <StackPanel>
-                            <Slider x:Name="VolumeSlider" Maximum="100" Minimum="0" Value="50" ValueChanged="VolumeSlider_ValueChanged" Margin="0,10"/>
+                            <Slider x:Name="VolumeSlider" 
+                                    Maximum="100" 
+                                    Minimum="0" 
+                                    ValueChanged="VolumeSlider_ValueChanged" 
+                                    Margin="0,10" 
+                                    Focusable="False"/>
                             <Grid>
                                 <StackPanel Orientation="Horizontal">
                                     <Button Content="－" Click="BrightnessDown_Click" Width="40" Background="#33FFFFFF" Foreground="White" BorderThickness="0"/>
