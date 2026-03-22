@@ -15,12 +15,18 @@ using System.Windows.Shapes;
 using Windows.Media.Control;
 using System.Windows.Media.Effects;
 using System.Net.NetworkInformation;
+using System.Net.Http; 
 using Forms = System.Windows.Forms;
+using System.Runtime.InteropServices;
 
 namespace DynamicIsland
 {
     public partial class MainWindow : Window
     {
+       
+        [DllImport("user32.dll", CharSet = CharSet.Auto, ExactSpelling = true)]
+        public static extern short GetAsyncKeyState(int vKey);
+
         private Forms.NotifyIcon _notifyIcon;
         private PerformanceCounter _cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
         private PerformanceCounter _ramCounter = new PerformanceCounter("Memory", "Available MBytes");
@@ -44,10 +50,17 @@ namespace DynamicIsland
         private double _currentTemp = 0;
         private bool _isOverheating = false;
         
-        private int _initialStyle; // 用於儲存初始視窗樣式
+        private int _initialStyle; 
         private const int GWL_EXSTYLE = -20;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
         private const int WS_EX_TRANSPARENT = 0x00000020;
+        private DispatcherTimer _autoCollapseTimer;
+
+     
+        private readonly string _currentVersion = "3.0"; 
+        private readonly string _versionUrl = "https://raw.githubusercontent.com/GreenMoon0212/DynamicIsland/refs/heads/main/version.txt";
+        private readonly string _downloadUrl = "https://github.com/GreenMoon0212/DynamicIsland/releases";
+        private bool _hasUpdate = false;
 
         [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, uint dwExtraInfo);
         [DllImport("user32.dll")] private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
@@ -69,7 +82,7 @@ namespace DynamicIsland
 
             Timeline.DesiredFrameRateProperty.OverrideMetadata(
                 typeof(Timeline), 
-                new FrameworkPropertyMetadata(60)
+                new FrameworkPropertyMetadata(144)
             );
             
             this.Left = (SystemParameters.PrimaryScreenWidth - this.Width) / 2;
@@ -104,6 +117,84 @@ namespace DynamicIsland
 
             LoadSettings(); 
         }
+        
+      public static class AudioHelper
+{
+    [ComImport] [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] internal class MMDeviceEnumerator { }
+
+    [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IMMDeviceEnumerator {
+        int EnumAudioEndpoints(int dataFlow, int stateMask, out object devices);
+        [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IntPtr ppDevice);
+    }
+
+    [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IAudioEndpointVolume {
+        int RegisterControlChangeNotify(IntPtr pNotify);
+        int UnregisterControlChangeNotify(IntPtr pNotify);
+        int GetChannelCount(out int pnChannelCount);
+        int SetMasterVolumeLevel(float fLevelDB, ref Guid pguidEventContext);
+        int SetMasterVolumeLevelScalar(float fLevel, ref Guid pguidEventContext);
+        int GetMasterVolumeLevel(out float pfLevelDB);
+        int GetMasterVolumeLevelScalar(out float pfLevel);
+    }
+
+    [DllImport("user32.dll")] private static extern void ReleaseDC(IntPtr h, IntPtr d);
+
+    private static unsafe IAudioEndpointVolume GetVolumeControl()
+    {
+        IntPtr pDevice = IntPtr.Zero;
+        IntPtr pVolume = IntPtr.Zero;
+        try {
+            var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+            int hr = enumerator.GetDefaultAudioEndpoint(0, 0, out pDevice);
+            if (hr != 0 || pDevice == IntPtr.Zero) return null;
+
+           
+            IntPtr vtable = Marshal.ReadIntPtr(pDevice);
+           
+            IntPtr activatePtr = Marshal.ReadIntPtr(vtable, 3 * IntPtr.Size); 
+        
+         
+            delegate* unmanaged[Stdcall]<IntPtr, ref Guid, int, IntPtr, out IntPtr, int> activateFunc = 
+                (delegate* unmanaged[Stdcall]<IntPtr, ref Guid, int, IntPtr, out IntPtr, int>)activatePtr;
+
+            Guid iid = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+            hr = activateFunc(pDevice, ref iid, 1, IntPtr.Zero, out pVolume);
+
+            if (hr != 0 || pVolume == IntPtr.Zero) return null;
+
+            return (IAudioEndpointVolume)Marshal.GetObjectForIUnknown(pVolume);
+        }
+        catch (Exception ex) {
+            System.Diagnostics.Debug.WriteLine($"[音量崩潰] 原因: {ex.Message}");
+            return null;
+        }
+        finally {
+            if (pDevice != IntPtr.Zero) Marshal.Release(pDevice);
+        }
+    }
+
+    public static float Volume {
+        get {
+            var control = GetVolumeControl();
+            if (control == null) return 0;
+            try {
+                control.GetMasterVolumeLevelScalar(out float v);
+                return v * 100;
+            } finally { Marshal.ReleaseComObject(control); }
+        }
+        set {
+            var control = GetVolumeControl();
+            if (control != null) {
+                try {
+                    Guid g = Guid.Empty;
+                    control.SetMasterVolumeLevelScalar(value / 100f, ref g);
+                } finally { Marshal.ReleaseComObject(control); }
+            }
+        }
+    }
+}
 
         private void UpdatePenetration()
         {
@@ -125,9 +216,32 @@ namespace DynamicIsland
                
                 if ((currentStyle & WS_EX_TRANSPARENT) != 0)
                 {
-                    SetWindowLong(hwnd, GWL_EXSTYLE, _initialStyle | WS_EX_TOOLWINDOW);
+                    SetWindowLong(hwnd, GWL_EXSTYLE, _initialStyle | WS_EX_TOOLWINDOW | 0x08000000 | 0x00000008);
                 }
             }
+        }
+        
+        private async void CheckForUpdatesAsync()
+        {
+            try {
+                using (var client = new HttpClient()) {
+                    client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0");
+                    client.Timeout = TimeSpan.FromSeconds(5);
+
+                 
+                    string requestUrl = _versionUrl + "?t=" + DateTime.Now.Ticks; 
+                    string latestVersion = (await client.GetStringAsync(requestUrl)).Trim();
+                    // ------------------------------------------
+
+                    if (latestVersion != _currentVersion) {
+                        _hasUpdate = true;
+                        Dispatcher.Invoke((Action)(() => {
+                            DropZoneText.Text = $"✨ 發現新版本 {latestVersion}！點我更新";
+                            DropZoneText.Foreground = System.Windows.Media.Brushes.Gold;
+                        }));
+                    }
+                }
+            } catch { }
         }
         
         private void InitTrayIcon()
@@ -283,6 +397,7 @@ namespace DynamicIsland
 
         public void Collapse() { 
             _isExpanded = false; 
+            _autoCollapseTimer?.Stop(); 
             ControlPanel.BeginAnimation(HeightProperty, new DoubleAnimation(0, TimeSpan.FromMilliseconds(300))); 
             IslandBorder.BeginAnimation(WidthProperty, new DoubleAnimation(330, TimeSpan.FromMilliseconds(300))); 
             ControlPanel.Opacity = 0;
@@ -291,10 +406,27 @@ namespace DynamicIsland
 
         private void Expand() { 
             _isExpanded = true; 
+            
+            try {
+                VolumeSlider.ValueChanged -= VolumeSlider_ValueChanged;
+                VolumeSlider.Value = AudioHelper.Volume;
+                VolumeSlider.ValueChanged += VolumeSlider_ValueChanged;
+            } catch { }
+            
             ControlPanel.BeginAnimation(HeightProperty, new DoubleAnimation(350, TimeSpan.FromMilliseconds(400))); 
             IslandBorder.BeginAnimation(WidthProperty, new DoubleAnimation(500, TimeSpan.FromMilliseconds(400))); 
             ControlPanel.Opacity = 1; 
             MoveIsland(VisibleTop);
+
+            if (_autoCollapseTimer == null) {
+                _autoCollapseTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+                _autoCollapseTimer.Tick += (s, e) => {
+                    if (_isExpanded && (GetAsyncKeyState(0x01) & 0x8000) != 0) {
+                        if (!IsMouseOver) Collapse();
+                    }
+                };
+            }
+            _autoCollapseTimer.Start();
         }
 
         private void Handle_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e) { 
@@ -309,17 +441,15 @@ namespace DynamicIsland
 
         private void Window_Deactivated(object sender, EventArgs e) { if (_isExpanded) Collapse(); }
 
-        private void VolumeSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e) {
-            if (IsLoaded) {
-                double delta = e.NewValue - _lastSliderValue;
-                if (Math.Abs(delta) >= 2.5) {
-                    for (int i = 0; i < (int)(Math.Abs(delta) / 2.5); i++) 
-                        keybd_event(delta > 0 ? (byte)0xAF : (byte)0xAE, 0, 0, 0);
-                    _lastSliderValue = e.NewValue;
-                }
+        private void VolumeSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            this.Title = "正在調整音量: " + e.NewValue.ToString();
+
+            if (this.IsLoaded && VolumeSlider != null)
+            {
+                AudioHelper.Volume = (float)e.NewValue;
             }
         }
-
         public void UpdateSystemColor(System.Windows.Media.Color c, bool isManual = false) {
             if (!isManual && _isManualColor) return; 
             if (isManual) { _isManualColor = true; _baseBlurRadius = IslandGlow.BlurRadius; SaveSettings(c); }
@@ -388,11 +518,25 @@ namespace DynamicIsland
         private void Island_DragOver(object s, System.Windows.DragEventArgs e) => e.Effects = e.Data.GetDataPresent(System.Windows.DataFormats.FileDrop) ? System.Windows.DragDropEffects.Copy : System.Windows.DragDropEffects.None;
         private void DropZone_PreviewMouseLeftButtonDown(object s, System.Windows.Input.MouseButtonEventArgs e) => _dragStartPoint = e.GetPosition(null);
         private void DropZone_MouseMove(object s, System.Windows.Input.MouseEventArgs e) { Vector diff = _dragStartPoint - e.GetPosition(null); if (e.LeftButton == System.Windows.Input.MouseButtonState.Pressed && _droppedFilePath != null && (Math.Abs(diff.X) > 5 || Math.Abs(diff.Y) > 5)) { if (DragDrop.DoDragDrop(this, new System.Windows.Forms.DataObject(System.Windows.Forms.DataFormats.FileDrop, new string[] { _droppedFilePath }), System.Windows.DragDropEffects.Copy) != System.Windows.DragDropEffects.None) { _droppedFilePath = null; DropZoneText.Text = "📂 拖放檔案至此處中轉"; DropZoneText.Foreground =  System.Windows.Media.Brushes.Gray; } } }
-        private void DropZone_MouseDown(object s, System.Windows.Input.MouseButtonEventArgs e) { if (e.ClickCount == 2 && _droppedFilePath != null) System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{_droppedFilePath}\""); }
+        private void DropZone_MouseDown(object s, System.Windows.Input.MouseButtonEventArgs e) { 
+            if (_hasUpdate) { Process.Start(new ProcessStartInfo(_downloadUrl) { UseShellExecute = true }); return; }
+            if (e.ClickCount == 2 && _droppedFilePath != null) System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{_droppedFilePath}\""); 
+        }
         private void SetBrightness(int t) { try { using var mc = new ManagementClass("WmiMonitorBrightnessMethods") { Scope = new ManagementScope(@"\\.\root\wmi") }; foreach (ManagementObject i in mc.GetInstances()) i.InvokeMethod("WmiSetBrightness", new object[] { uint.MaxValue, (byte)t }); } catch { } }
         private void BrightnessUp_Click(object s, RoutedEventArgs e) => SetBrightness(80);
         private void BrightnessDown_Click(object s, RoutedEventArgs e) => SetBrightness(20);
-        private void Mute_Click(object s, RoutedEventArgs e) { keybd_event(0xAD, 0, 0, 0); }
+        private void Mute_Click(object s, RoutedEventArgs e) {
+            try {
+                AudioHelper.Volume = 0;
+           
+                VolumeSlider.Value = 0;
+        
+            
+                StatusText.Text = "🔇 已靜音";
+            } catch (Exception ex) {
+                Debug.WriteLine("靜音失敗: " + ex.Message);
+            }
+        }
         private async void PlayPause_Click(object s, RoutedEventArgs e) { if (_currentSession != null) await _currentSession.TryTogglePlayPauseAsync(); }
         private async void Prev_Click(object s, RoutedEventArgs e) { if (_currentSession != null) await _currentSession.TrySkipPreviousAsync(); }
         private async void Next_Click(object s, RoutedEventArgs e) { if (_currentSession != null) await _currentSession.TrySkipNextAsync(); }
@@ -403,12 +547,12 @@ namespace DynamicIsland
         {
             base.OnSourceInitialized(e);
             IntPtr hwnd = new WindowInteropHelper(this).Handle;
-            
-           
             _initialStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
-            
-            
-            SetWindowLong(hwnd, GWL_EXSTYLE, _initialStyle | WS_EX_TOOLWINDOW);
+
+          
+            SetWindowLong(hwnd, GWL_EXSTYLE, _initialStyle | 0x00000080 | 0x08000000 | 0x00000008);
+     
+            CheckForUpdatesAsync();
         }
 
         private IntPtr HwndHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled) { return IntPtr.Zero; }
